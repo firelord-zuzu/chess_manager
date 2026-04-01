@@ -67,6 +67,7 @@ class PlayerStats:
     total_score: float = 0.0
     rounds_missed: int = 0
     buchholz_score: float = 0.0  # Sum of opponents' scores
+    whites_played: int = 0       # Number of times player had white pieces
 
     def get_win_percentage(self) -> float:
         """Calculate win percentage."""
@@ -142,37 +143,75 @@ class SwissTournament:
 
     def generate_pairings(self, round_number: int, byes: List[str] = None) -> List[Tuple[Player, Player]]:
         """
-        Generate swiss pairings for a round.
-        Players in 'byes' list will receive a bye (missed round).
+        Generate Swiss pairings for a round.
+        Players in 'byes' list will receive a bye (missed round, 0 pts).
+        An odd player left over receives an auto-bye worth 1 point.
         Returns list of (white_player, black_player) tuples.
         """
         if byes is None:
             byes = []
 
-        # Get players sorted by score (descending) then rating (descending)
+        # Build set of already-played matchups to avoid rematches
+        played_pairs: set = set()
+        for rnd in self.rounds.values():
+            for game in rnd.games.values():
+                a = game.white_player.player_id
+                b = game.black_player.player_id
+                played_pairs.add((a, b))
+                played_pairs.add((b, a))
+
+        # Sort available players by score desc, then rating desc (Swiss order)
         available_players = [p for pid, p in self.players.items() if pid not in byes]
         available_players.sort(
             key=lambda p: (-self.player_stats[p.player_id].total_score, -p.rating)
         )
 
-        # Simple swiss pairing: pair top half with bottom half
         pairings = []
         paired = set()
 
-        for i in range(len(available_players) // 2):
-            white = available_players[i]
-            black = available_players[len(available_players) - 1 - i]
+        for i, player in enumerate(available_players):
+            if player.player_id in paired:
+                continue
 
-            if white not in paired and black not in paired:
-                pairings.append((white, black))
-                paired.add(white)
-                paired.add(black)
+            opponent = None
+            # Prefer nearest unpaired player we haven't played before
+            for j in range(i + 1, len(available_players)):
+                candidate = available_players[j]
+                if candidate.player_id in paired:
+                    continue
+                if (player.player_id, candidate.player_id) not in played_pairs:
+                    opponent = candidate
+                    break
 
-        # Handle odd player without a pairing
+            # Fallback: allow rematch if no unplayed opponent is available
+            if opponent is None:
+                for j in range(i + 1, len(available_players)):
+                    candidate = available_players[j]
+                    if candidate.player_id not in paired:
+                        opponent = candidate
+                        break
+
+            if opponent is None:
+                continue  # will be caught as auto-bye below
+
+            # Assign colors to balance each player's white/black history
+            p_whites = self.player_stats[player.player_id].whites_played
+            o_whites = self.player_stats[opponent.player_id].whites_played
+            if p_whites <= o_whites:
+                white, black = player, opponent
+            else:
+                white, black = opponent, player
+
+            pairings.append((white, black))
+            paired.add(player.player_id)
+            paired.add(opponent.player_id)
+
+        # Auto-bye: odd player left without a pairing earns 1 point
         if len(available_players) % 2 == 1:
-            unpaired = [p for p in available_players if p not in paired]
+            unpaired = [p for p in available_players if p.player_id not in paired]
             if unpaired:
-                byes.append(unpaired[0].player_id)
+                auto_bye_pid = unpaired[0].player_id
+                self.record_bye(auto_bye_pid, round_number, score=1.0)
 
         return pairings
 
@@ -216,6 +255,7 @@ class SwissTournament:
 
         white_stats.games_played += 1
         black_stats.games_played += 1
+        white_stats.whites_played += 1
 
         white_score = game.get_white_score()
         black_score = game.get_black_score()
@@ -233,16 +273,22 @@ class SwissTournament:
             white_stats.draws += 1
             black_stats.draws += 1
 
-    def record_bye(self, player_id: str, round_number: int):
-        """Record that a player missed a round (bye)."""
+    def record_bye(self, player_id: str, round_number: int, score: float = 0.0):
+        """Record that a player missed a round (bye).
+
+        score=1.0 for system-assigned byes (odd player out, earns a full point).
+        score=0.0 for manually selected byes (absent/voluntary, no point awarded).
+        """
         if player_id not in self.player_stats:
             raise ValueError(f"Player {player_id} not found")
 
         stats = self.player_stats[player_id]
         stats.rounds_missed += 1
+        stats.total_score += score
 
     def get_standings(self) -> List[PlayerStats]:
         """Get tournament standings sorted by score."""
+        self.calculate_buchholz_scores()
         standings = list(self.player_stats.values())
         standings.sort(
             key=lambda s: (-s.total_score, -s.buchholz_score, -s.player.rating)

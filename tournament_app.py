@@ -346,10 +346,25 @@ elif page == "rounds":
                 format_func=lambda pid: bye_options[pid]
             )
             if st.form_submit_button(_("start_round_btn"), use_container_width=True):
+                # Guard: block new round while current round has open games
+                if t().current_round > 0:
+                    open_games = [
+                        g for g in t().get_round_games(t().current_round)
+                        if g.result is None
+                    ]
+                    if open_games:
+                        st.error(
+                            f"Round {t().current_round} still has "
+                            f"{len(open_games)} unfinished game(s). "
+                            f"Record all results before starting round {next_round}."
+                        )
+                        st.stop()
                 try:
                     t().start_round(next_round)
                     pairings = t().generate_pairings(next_round, byes=selected_byes.copy())
                     t().create_games(next_round, pairings)
+                    for pid in selected_byes:
+                        t().record_bye(pid, next_round, score=0.0)
                     save_state()
                     st.success(_("round_started", n=next_round, count=len(pairings)))
                     st.rerun()
